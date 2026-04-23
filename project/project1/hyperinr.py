@@ -58,6 +58,14 @@ class HyperNetwork(nn.Module):
         )
         self.theta_head = nn.Linear(latent_dim, total_params)
 
+        # SIREN: re-initialize theta_head so its output has std ≈ 1, which after
+        # per-layer scaling in unpack_params lands weights in the correct SIREN range.
+        # Default Xavier gives theta std ≈ 0.03–0.07, making hidden weights 30× too
+        # small and collapsing SIREN hidden layers into the linear regime of sin().
+        if coord_cfg is not None and coord_cfg.arch == "siren":
+            nn.init.normal_(self.theta_head.weight, std=1.15)
+            nn.init.zeros_(self.theta_head.bias)
+
         # Fixed random Fourier frequency matrix (Tancik et al. 2020).
         # Stored as a buffer so it moves with the model and is saved in checkpoints.
         if coord_cfg is not None and coord_cfg.arch == "fourier":
@@ -106,17 +114,17 @@ def unpack_params(
         b = theta[:, cursor : cursor + b_size].view(batch, out_dim)
         cursor += b_size
 
-        # SIREN weight initialization follows Sitzmann et al. 2020:
-        # - First layer: weights in [-1/n, 1/n] (n = fan-in)
-        # - Hidden layers: weights in [-sqrt(6/n)/omega, sqrt(6/n)/omega]
-        # tanh bounds the raw theta output then we scale to the target range.
+        # SIREN weight scaling (Sitzmann et al. 2020).
+        # Multiply by the target initialization scale so weights start in the
+        # right range; no tanh — clamping every forward pass prevents the
+        # network from learning high-frequency content (worse LPIPS).
         if cfg.arch == "siren" and idx < n_layers - 1:
             if idx == 0:
                 scale = 1.0 / in_dim
             else:
                 scale = math.sqrt(6.0 / in_dim) / cfg.hidden_omega
-            w = torch.tanh(w) * scale
-            b = torch.tanh(b) * scale
+            w = w * scale
+            b = b * scale
 
         params.append((w, b))
 
