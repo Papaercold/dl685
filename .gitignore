@@ -1,0 +1,21 @@
+# Datasets (very large, download separately)
+data/
+**/data/
+
+# Model checkpoints (100MB+ each)
+**/*.pt
+**/*.pth
+
+# Keep metrics logs and figures
+!**/runs/*.jsonl
+!**/runs/figures/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# System
+.DS_Store
+*.swp
