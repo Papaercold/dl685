@@ -34,6 +34,13 @@ class CoordNetConfig:
 
 
 class HyperNetwork(nn.Module):
+    # Encoder: 3→64→128→256 channels, 3 stride-2 convs, spatial pool to 4×4.
+    # For a 32px input  : feature map 4×4 after striding (pool is identity).
+    # For a 128px input : feature map 16×16 after striding, pooled to 4×4.
+    # Either way the encoder output is always 256×4×4 = 4096-dim.
+    _ENC_CH = 256
+    _ENC_SP = 4
+
     def __init__(
         self,
         total_params: int,
@@ -42,28 +49,40 @@ class HyperNetwork(nn.Module):
     ) -> None:
         super().__init__()
         self.latent_dim = latent_dim
+        enc_out = self._ENC_CH * self._ENC_SP * self._ENC_SP  # 4096
+
         self.encoder = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Conv2d(128, self._ENC_CH, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(self._ENC_CH),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((self._ENC_SP, self._ENC_SP)),
             nn.Flatten(),
         )
+        # LayerNorm after projection keeps z in a predictable range, which
+        # makes SIREN theta_head initialization exact (see below).
         self.latent_head = nn.Sequential(
-            nn.Linear(128, latent_dim),
+            nn.Linear(enc_out, latent_dim),
+            nn.LayerNorm(latent_dim),
             nn.ReLU(inplace=True),
         )
         self.theta_head = nn.Linear(latent_dim, total_params)
 
-        # SIREN: re-initialize theta_head so its output has std ≈ 1, which after
-        # per-layer scaling in unpack_params lands weights in the correct SIREN range.
-        # Default Xavier gives theta std ≈ 0.03–0.07, making hidden weights 30× too
-        # small and collapsing SIREN hidden layers into the linear regime of sin().
+        # SIREN init: LayerNorm makes z ≈ N(0,1), so theta = z @ W.T has
+        # std = sqrt(latent_dim) * W_std.  Setting W_std = 1/sqrt(latent_dim)
+        # gives theta_std ≈ 1, which after per-layer scaling in unpack_params
+        # (scale = sqrt(6/n)/ω for hidden, 1/n for first) lands each weight
+        # exactly in the SIREN initialization range.
         if coord_cfg is not None and coord_cfg.arch == "siren":
-            nn.init.normal_(self.theta_head.weight, std=1.15)
+            # ReLU kills ~half the neurons, so E[z²] ≈ 0.5 per element.
+            # Var(theta_i) = latent_dim * 0.5 * W_std² → theta_std = sqrt(latent_dim/2) * W_std
+            # Setting W_std = sqrt(2/latent_dim) → theta_std ≈ 1.
+            nn.init.normal_(self.theta_head.weight, std=math.sqrt(2.0 / latent_dim))
             nn.init.zeros_(self.theta_head.bias)
 
         # Fixed random Fourier frequency matrix (Tancik et al. 2020).

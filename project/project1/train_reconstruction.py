@@ -146,6 +146,9 @@ def train(args: argparse.Namespace) -> None:
                 loss = F.mse_loss(preds, targets)
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
+            scaler.unscale_(opt)
+            if args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             scaler.step(opt)
             scaler.update()
 
@@ -224,6 +227,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--train-lowres", type=int, default=0)
     p.add_argument("--superres-eval-size", type=int, default=0)
 
+    p.add_argument("--grad-clip", type=float, default=1.0,
+                   help="Max gradient norm (0 to disable).")
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--amp", action="store_true", help="Enable mixed precision on CUDA.")
     return p.parse_args()
