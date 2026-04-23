@@ -73,17 +73,14 @@ class HyperNetwork(nn.Module):
         )
         self.theta_head = nn.Linear(latent_dim, total_params)
 
-        # SIREN init: LayerNorm makes z ≈ N(0,1), so theta = z @ W.T has
-        # std = sqrt(latent_dim) * W_std.  Setting W_std = 1/sqrt(latent_dim)
-        # gives theta_std ≈ 1, which after per-layer scaling in unpack_params
-        # (scale = sqrt(6/n)/ω for hidden, 1/n for first) lands each weight
-        # exactly in the SIREN initialization range.
-        if coord_cfg is not None and coord_cfg.arch == "siren":
-            # ReLU kills ~half the neurons, so E[z²] ≈ 0.5 per element.
-            # Var(theta_i) = latent_dim * 0.5 * W_std² → theta_std = sqrt(latent_dim/2) * W_std
-            # Setting W_std = sqrt(2/latent_dim) → theta_std ≈ 1.
-            nn.init.normal_(self.theta_head.weight, std=math.sqrt(2.0 / latent_dim))
-            nn.init.zeros_(self.theta_head.bias)
+        # Calibrated theta_head init for ALL architectures.
+        # ReLU in latent_head kills ~half the neurons → E[z²] ≈ 0.5.
+        # Var(theta_i) = latent_dim * 0.5 * W_std²  →  theta_std ≈ sqrt(latent_dim/2)*W_std.
+        # W_std = sqrt(2/latent_dim)  →  theta_std ≈ 1.
+        # Per-layer scaling in unpack_params then maps theta to the correct
+        # weight range for each architecture (SIREN range or Kaiming range).
+        nn.init.normal_(self.theta_head.weight, std=math.sqrt(2.0 / latent_dim))
+        nn.init.zeros_(self.theta_head.bias)
 
         # Fixed random Fourier frequency matrix (Tancik et al. 2020).
         # Stored as a buffer so it moves with the model and is saved in checkpoints.
@@ -133,15 +130,17 @@ def unpack_params(
         b = theta[:, cursor : cursor + b_size].view(batch, out_dim)
         cursor += b_size
 
-        # SIREN weight scaling (Sitzmann et al. 2020).
-        # Multiply by the target initialization scale so weights start in the
-        # right range; no tanh — clamping every forward pass prevents the
-        # network from learning high-frequency content (worse LPIPS).
-        if cfg.arch == "siren" and idx < n_layers - 1:
-            if idx == 0:
-                scale = 1.0 / in_dim
+        # Per-layer weight scaling so every architecture starts in a healthy range.
+        # Without this, ReLU/Fourier hidden weights are 3× too large → activations
+        # explode across 4 layers → float16 overflow → NaN loss by epoch 3.
+        if idx < n_layers - 1:
+            if cfg.arch == "siren":
+                # Sitzmann et al. 2020: uniform in [-1/n, 1/n] for first layer,
+                # [-sqrt(6/n)/ω, sqrt(6/n)/ω] for hidden layers.
+                scale = 1.0 / in_dim if idx == 0 else math.sqrt(6.0 / in_dim) / cfg.hidden_omega
             else:
-                scale = math.sqrt(6.0 / in_dim) / cfg.hidden_omega
+                # Kaiming / He init for ReLU and Fourier MLPs.
+                scale = math.sqrt(2.0 / in_dim)
             w = w * scale
             b = b * scale
 
