@@ -2,9 +2,12 @@
 data/
 **/data/
 
-# Model checkpoints (100MB+ each)
-**/*.pt
+# Model checkpoints (100MB+ each — too large for GitHub)
+**/*_recon.pt
 **/*.pth
+
+# Keep small classifier checkpoints for reproducibility
+!**/*_cls.pt
 
 # Keep metrics logs and figures
 !**/runs/*.jsonl
